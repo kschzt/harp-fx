@@ -1,0 +1,1 @@
+/usr/bin/cc -O2 -g -DNDEBUG -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names "CMakeFiles/fx-audio-test.dir/Users/jak/src/harp-fx/harness/fx_audio_test.c.o" "CMakeFiles/fx-audio-test.dir/Users/jak/src/harp/host/client.c.o" "CMakeFiles/fx-audio-test.dir/Users/jak/src/harp/host/sock_io.c.o" -o fx-audio-test  libfx_harpcore.a -lm
