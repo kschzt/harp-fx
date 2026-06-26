@@ -1,5 +1,0 @@
-/Users/jak/src/harp-fx/device/build/CMakeFiles/fx_harpcore.dir
-/Users/jak/src/harp-fx/device/build/CMakeFiles/harp-fx-deviced.dir
-/Users/jak/src/harp-fx/device/build/CMakeFiles/fx-audio-test.dir
-/Users/jak/src/harp-fx/device/build/CMakeFiles/edit_cache.dir
-/Users/jak/src/harp-fx/device/build/CMakeFiles/rebuild_cache.dir
