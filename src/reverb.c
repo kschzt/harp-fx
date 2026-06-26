@@ -21,9 +21,20 @@
 
 #define FB  26
 #define ONE ((int64_t)1<<FB)
+#define WSHIFT 55                                /* wet-gain fixed-point scale (Q55)*/
 typedef int32_t fx;
 static inline fx fmul(fx a,fx b){ return (fx)(((int64_t)a*(int64_t)b)>>FB); }
 static inline fx FX(double x){ return (fx)llround(x*(double)ONE); }
+/* wet scale, PURE INTEGER (fabric-bit-exact). wetg is frozen to a Q55 int (wetg_k) on
+ * the host; here we just do wf = round(sum * wetg_k / 2^55) with a 128-bit product and
+ * round-half-away-from-zero (matches the old llround). No float in the per-sample path —
+ * this is the one line that previously used a double, now silicon-identical. */
+static inline fx wet_scale(int64_t sum,int64_t wetg_k){
+    __int128 p=(__int128)sum*(__int128)wetg_k;
+    int64_t r = (p>=0)? (int64_t)(( p+((__int128)1<<(WSHIFT-1)))>>WSHIFT)
+                      :-(int64_t)((-p+((__int128)1<<(WSHIFT-1)))>>WSHIFT);
+    return (fx)r;
+}
 #define RATE 48000.0
 #define NDIFF 4                                  /* input diffusion allpass stages */
 
@@ -37,7 +48,8 @@ typedef struct {
     /* input diffusion: NDIFF Schroeder allpasses */
     fx   *dbuf[NDIFF]; int dlen[NDIFF],dpos[NDIFF]; fx dg; int diff_on;
     fx   xm1,xm2;                                 /* input history (bandpass source)*/
-    double wetg;
+    double  wetg;                                  /* host-side wet gain (double)     */
+    int64_t wetg_k;                                /* …frozen to Q55 int for the kernel*/
 } reverb;
 
 /* canonical Schroeder allpass: w=x+g*w[n-D]; y=w[n-D]-g*w */
@@ -71,6 +83,7 @@ static reverb* rev_init(int N,double t60,double wet,double hidamp,double diffuse
     for(int k=0;k<3;k++){ R->clenA[k]=dA[k]; R->cbufA[k]=calloc(dA[k],4); R->cposA[k]=0;
                           R->clenB[k]=dB[k]; R->cbufB[k]=calloc(dB[k],4); R->cposB[k]=0; }
     R->wetg=wet*12.0/sqrt((double)N);
+    R->wetg_k=(int64_t)llround(R->wetg*(double)((int64_t)1<<WSHIFT)); /* freeze → Q55 int */
     return R;
 }
 static void rev_free(reverb*R){ if(!R)return;
@@ -89,7 +102,7 @@ static void rev_process(reverb*R,fx x,double*outL,double*outR){
         R->s2[i]=R->s1[i]; R->s1[i]=y;
         sum += y;                                          /* mono wet (decorrelate to stereo next) */
     }
-    fx wf=(fx)llround((double)sum/ONE*R->wetg*ONE);        /* mono wet sample (fx) */
+    fx wf=wet_scale(sum,R->wetg_k);                       /* mono wet sample (fx, pure int) */
     fx la=wf; for(int k=0;k<3;k++) la=ap_proc(R->cbufA[k],R->clenA[k],&R->cposA[k],R->cg,la);
     fx rb=wf; for(int k=0;k<3;k++) rb=ap_proc(R->cbufB[k],R->clenB[k],&R->cposB[k],R->cg,rb);
     fx l=wf+fmul(R->widthf,la-wf), r=wf+fmul(R->widthf,rb-wf);   /* blend mono↔phase-decorrelated */
