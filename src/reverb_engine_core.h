@@ -23,8 +23,14 @@
 #define FB  26
 #define ONE ((int64_t)1<<FB)
 #define WSHIFT 55                                /* wet-gain fixed-point scale (Q55)*/
+/* fx + fmul are the ONE arithmetic primitive, byte-identical to fabric/reverb_defs.h.
+ * Guard them so a TU may include BOTH this engine header AND reverb_defs.h (the fabric
+ * driver, device/rev_fabric.c, needs the reverb struct here + the rev_coeffs layout there). */
+#ifndef HARPFX_FX_PRIMITIVES
+#define HARPFX_FX_PRIMITIVES
 typedef int32_t fx;
 static inline fx fmul(fx a,fx b){ return (fx)(((int64_t)a*(int64_t)b)>>FB); }
+#endif
 static inline fx FX(double x){ return (fx)llround(x*(double)ONE); }
 /* wet scale, PURE INTEGER (fabric-bit-exact). wetg is frozen to a Q55 int (wetg_k) on
  * the host; here we just do wf = round(sum * wetg_k / 2^55) with a 128-bit product and

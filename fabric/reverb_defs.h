@@ -31,10 +31,14 @@
 #define B2 113                         /* R decorrelation delays {199,317,113}    */
 #define BS 512                         /* render block (samples/handshake)        */
 
+/* fx + fmul are the ONE arithmetic primitive — identical to src/reverb.c fmul().
+ * int64 intermediate, arithmetic >>26; never overflows int32 on the result.
+ * Guarded (HARPFX_FX_PRIMITIVES) so this header co-includes with reverb_engine_core.h. */
+#ifndef HARPFX_FX_PRIMITIVES
+#define HARPFX_FX_PRIMITIVES
 typedef int32_t fx;
-/* the ONE arithmetic primitive — identical to src/reverb.c fmul().
- * int64 intermediate, arithmetic >>26; never overflows int32 on the result. */
 static inline fx fmul(fx a, fx b){ return (fx)(((int64_t)a * (int64_t)b) >> FB); }
+#endif
 
 /* scalar coefficients, written once to DDR (m_axi gmem0). Computed on the HOST in
  * double then frozen to fixed-point (Q26 gains; wetg as Q55), exactly like the modal

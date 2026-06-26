@@ -46,6 +46,9 @@
 #include "harp/plat.h"  /* harp_now_ns: the §8.3.1 real-time fence bound */
 
 #include "reverb_engine_core.h" /* rev_init / rev_process / rev_free + the Q26 kernel */
+#ifdef HARPFX_FABRIC
+#  include "rev_fabric.h" /* KR260 PL backend: rev_fabric_open/load_coeffs/block (one ap_ctrl_hs) */
+#endif
 
 /* audio_rtp_emit / audio_open_tcp_paced / audio_rtp_close live in the reused harp-deviced.c
  * (and are declared in device.h); we just call them from the copied audio thread. */
@@ -64,12 +67,26 @@
 
 static reverb        *g_rev;            /* the live resonator bank (one D→H stream) */
 static pthread_mutex_t g_rev_mu = PTHREAD_MUTEX_INITIALIZER;
+#ifdef HARPFX_FABRIC
+/* On the KR260 the per-sample recurrence runs in the PL. g_rev is still built (rev_init owns
+ * the coefficient math — ONE source of truth) but only its FROZEN coeffs are shipped to the
+ * fabric; the per-block DSP is rev_fabric_block, not rev_process. g_fabric_need_init makes the
+ * first render block after audio.start carry do_init=1 (kernel zeroes BRAM state + caches coeffs). */
+static _Atomic int g_fabric_need_init;
+#endif
 /* (re)build the reverb for a fresh stream — a clean tail every audio.start. The render
  * thread is the only caller once streaming, but audio.start/stop can race it, so guard. */
 static void reverb_reset(void) {
     pthread_mutex_lock(&g_rev_mu);
     if (g_rev) rev_free(g_rev);
     g_rev = rev_init(REV_N, REV_T60, REV_WET, REV_HIDAMP, REV_DIFFUSE, REV_WIDTH);
+#ifdef HARPFX_FABRIC
+    /* open the fabric once (idempotent), push this stream's frozen coeffs to DDR, and arm the
+     * one-shot init flag so the next render block resets the PL's resonator/allpass state. */
+    if (rev_fabric_open() == 0) rev_fabric_load_coeffs(g_rev);
+    else fprintf(stderr, "harp-fx-deviced: FABRIC OPEN FAILED — wet will be silence\n");
+    atomic_store(&g_fabric_need_init, 1);
+#endif
     pthread_mutex_unlock(&g_rev_mu);
 }
 
@@ -105,6 +122,11 @@ _Atomic float g_meter_rms[METER_NSLOTS];
  * path (no note faults, no real-time deadline misses on the offline bounce). */
 _Atomic int      g_touch_pending;
 _Atomic uint64_t g_evq_drops, g_evt_late, g_ramp_late, g_fence_waits, g_fence_timeouts;
+/* §14.2 FunctionFS transport-error counter: defined in device/ffs_link.c (NOT linked on the
+ * Ethernet/TCP harp-fx device), but session.c's emit_counters references it under #ifdef
+ * __linux__ (the Kria build). Define it here (stays 0 — no FFS) so the Linux link resolves;
+ * harmless/unused on macOS. Mirrors jetson-synth/device/gpu_bridge.c. */
+_Atomic uint64_t g_usb_errors;
 _Atomic uint32_t g_evt_consumed;
 
 /* ---- the live event queue (the symbols session.c pushes into) ----
@@ -159,19 +181,15 @@ static void evq_drain(uint64_t now) {
 
 #define TAU_D 6.283185307179586
 
-/* ---- M3 FABRIC backend (FOLLOW-UP, NOT YET WIRED) ----------------------------------------
- * On the Kria the per-sample resonator recurrence runs in the PL, not rev_process(). The
- * driver already exists in fabric/reverb_fabric.c (the udmabuf/uio mmap + per-block
- * ap_start/ap_done handshake + the verbatim coefficient freeze). To add it here:
- *   1. -DFABRIC in device/CMakeLists.txt; factor fabric/reverb_fabric.c's kernel-driver
- *      (open /dev/uio4 + /dev/udmabuf0, write the coeffs once at reverb_reset()) into a small
- *      fx_fabric_open()/fx_fabric_block(in,n,out) pair.
- *   2. in render_output below, `#ifdef FABRIC` write the mono input block to the DDR XIN
- *      buffer, pulse ap_start, spin on ap_done, read the wet stereo block from YOUT — instead
- *      of the rev_process() loop. The kernel's Q26 recurrence is identical, so the wet stays
- *      bit-exact to this software path (hence to the oracle).
- * Deliberately left as a documented seam: it must be verified ON the KR260 fabric (not on a
- * dev host), so it is not claimed done here. The SOFTWARE backend below is the verified one.
+/* ---- M3 FABRIC backend (WIRED, -DHARPFX_FABRIC) ------------------------------------------
+ * On the KR260 the per-sample resonator recurrence runs in the PL, not rev_process(). The
+ * driver (device/rev_fabric.c, lifted from fabric/reverb_fabric.c's FABRIC path) is split as:
+ *   - rev_fabric_open()        — mmap /dev/uio4 + /dev/udmabuf0, program the DDR pointers (once).
+ *   - rev_fabric_load_coeffs() — push rev_init's frozen Q26 coeffs to DDR at reverb_reset() (once).
+ *   - rev_fabric_block()       — per render block: fill XIN, ap_start, spin ap_done, read YOUT.
+ * render_output() below selects it under #ifdef HARPFX_FABRIC. The kernel's Q26 recurrence is
+ * identical to rev_process(), so the wet stays BIT-EXACT to the software path (hence the oracle
+ * and the standalone reverb_fabric tool). The SOFTWARE backend (default build) is unchanged.
  * ------------------------------------------------------------------------------------------ */
 
 /* ---- render_output: the render seam the audio loops call (host-paced bounce AND free-run).
@@ -190,10 +208,36 @@ static uint16_t render_output(audio_state *a, float *out, uint32_t n, float rate
     }
     const float *in = a->fx_in;           /* §8.8 column 0 = the mono input (NULL on free-run) */
     uint32_t     nin = a->fx_in_n;         /* valid input samples this block (0 ⇒ silence/tail) */
+    double peak = 0.0, sq = 0.0;
     pthread_mutex_lock(&g_rev_mu);
     if (!g_rev) { pthread_mutex_unlock(&g_rev_mu); reverb_reset(); pthread_mutex_lock(&g_rev_mu); }
+#ifdef HARPFX_FABRIC
+    /* ---- M3 FABRIC backend: the per-sample recurrence runs in the KR260 PL ----------------
+     * Convert the mono input block to Q26 (silence past nin ⇒ the reverb tail rings), run ONE
+     * kernel block (diffusion + resonators + stereo decorrelation + wet gain, all in fabric),
+     * and read the wet stereo back. The kernel's Q26 math is identical to rev_process(), so the
+     * wet is BIT-EXACT to the software path below (hence to the standalone reverb_fabric tool).
+     * The mutex serializes against reverb_reset()'s rev_fabric_load_coeffs (same DDR). ---- */
+    static fx xin_q[AUDIO_MAX_NSAMPLES];
+    static fx wet_q[2 * AUDIO_MAX_NSAMPLES];
+    for (uint32_t i = 0; i < n; i++) {
+        double xd = (in && i < nin) ? (double)in[i] : 0.0;
+        xin_q[i] = FX(xd);
+    }
+    int do_init = atomic_exchange(&g_fabric_need_init, 0); /* 1 only on the first block of a stream */
+    rev_fabric_block(xin_q, (int)n, do_init, wet_q);
+    for (uint32_t i = 0; i < n; i++) {
+        float lf = (float)((double)wet_q[2 * i]     / ONE); /* Q26 → float32, same recipe as rev_process */
+        float rf = (float)((double)wet_q[2 * i + 1] / ONE);
+        out[2 * i] = lf;      /* §8.8 WET ONLY */
+        out[2 * i + 1] = rf;
+        double al = fabs((double)lf), ar = fabs((double)rf);
+        if (al > peak) peak = al;
+        if (ar > peak) peak = ar;
+        sq += (double)lf * lf + (double)rf * rf;
+    }
+#else
     reverb *R = g_rev;
-    double peak = 0.0, sq = 0.0;
     for (uint32_t i = 0; i < n; i++) {
         double xd = (in && i < nin) ? (double)in[i] : 0.0; /* no input ⇒ feed silence, tail rings */
         double l, r;
@@ -206,6 +250,7 @@ static uint16_t render_output(audio_state *a, float *out, uint32_t n, float rate
         if (ar > peak) peak = ar;
         sq += (double)lf * lf + (double)rf * rf;
     }
+#endif
     pthread_mutex_unlock(&g_rev_mu);
     /* §9.9 main-mix meter fold (read-only of `out`; never feeds back into the render). */
     atomic_store(&g_meter_peak[METER_MAIN_IX], (float)peak);

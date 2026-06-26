@@ -58,7 +58,22 @@ add_executable(harp-fx-deviced
 )
 target_include_directories(harp-fx-deviced PRIVATE
   ${HARP_ROOT}/device ${HARP_ROOT}/host ${HARP_ROOT}/core/include
-  ${CMAKE_CURRENT_SOURCE_DIR}/../src) # reverb_engine_core.h (the shared DSP)
+  ${CMAKE_CURRENT_SOURCE_DIR}/../src      # reverb_engine_core.h (the shared DSP)
+  ${CMAKE_CURRENT_SOURCE_DIR}/../fabric)  # reverb_defs.h (the fabric DDR layout)
+
+# --- HARPFX_FABRIC: drive the KR260 reverb_kernel (PL) instead of rev_process (PS) ---------
+# The fabric variant adds device/rev_fabric.c (the /dev/uio4 + /dev/udmabuf0 driver, lifted from
+# fabric/reverb_fabric.c's FABRIC path) and swaps render_output's per-block DSP to the fabric.
+# Linux/aarch64 only — build it NATIVELY on the Kria:
+#   cmake -S device -B device/build-fabric -DHARP_ROOT=~/harp-src -DHARPFX_FABRIC=ON
+#   cmake --build device/build-fabric
+# The default (OFF) build is the bit-exact SOFTWARE device — unchanged.
+option(HARPFX_FABRIC "drive the KR260 fabric reverb_kernel from the device render path" OFF)
+if(HARPFX_FABRIC)
+  target_sources(harp-fx-deviced PRIVATE rev_fabric.c)
+  target_compile_definitions(harp-fx-deviced PRIVATE HARPFX_FABRIC)
+  message(STATUS "harp-fx-deviced: FABRIC backend ON (KR260 reverb_kernel via /dev/uio4)")
+endif()
 
 # NPARAMS: the harp default is 12 (device.h). The linked harp lib sources (session.c/state.c,
 # which size the param bank by NPARAMS) AND reverb_engine.c MUST agree — so we leave the
