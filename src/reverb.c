@@ -58,8 +58,8 @@ int main(int argc,char**argv){
     long tail=(long)(t60*1.5*RATE), total=n+tail;
     fx *s1=calloc(N,sizeof(fx)),*s2=calloc(N,sizeof(fx)),*a1=calloc(N,sizeof(fx)),*r2=calloc(N,sizeof(fx)),*gi=calloc(N,sizeof(fx));
     double*hz=calloc(N,sizeof(double));
-    fx symc=(fx)llround(symd*ONE), inj=(fx)llround(inject*ONE);
-    fx blp=0,bdcx=0,bdcy=0;
+    (void)symd; (void)inject;
+
 
     /* tune: N resonators log-spaced 30Hz..18kHz + jitter (dense modal field, no obvious
      * pitch). high modes decay faster (air absorption) → natural tail. */
@@ -73,26 +73,34 @@ int main(int argc,char**argv){
         if(t<0.05)t=0.05;
         double r=exp(-6.9078/(t*RATE));
         a1[i]=(fx)llround(2*r*cos(w)*ONE); r2[i]=(fx)llround(r*r*ONE);
-        gi[i]=(fx)llround((0.6+0.4*((rng>>11)&255)/255.0)*ONE);  /* slight gain variation */
+        /* BANDPASS excitation gain ∝ (1-r²): zeros at DC+Nyquist make each resonator a true
+         * bandpass (it RINGS at f_i, attenuates elsewhere) — feeding 440Hz rings only the
+         * near-440 resonators, so the tail follows the INPUT instead of generating noise.
+         * The (1-r²) factor gives ~equal peak gain across the Q range. */
+        gi[i]=(fx)llround((1.0-r*r)*(0.5+0.5*((rng>>11)&255)/255.0)*ONE);
     }
 
     short*out=malloc(sizeof(short)*total); double peak=0;
-    double drymix=1.0-wet*0.5, wetg=wet*3.5/sqrt((double)N);
+    double drymix=1.0-wet, wetg=wet*16.0/sqrt((double)N);
+    fx xm1=0,xm2=0;
     for(long t=0;t<total;t++){
         fx x = t<n ? (fx)llround(dry[t]*ONE) : 0;
-        fx drive = fmul(inj,x) + fmul(symc,blp);     /* input + diffusion drive every resonator */
+        fx xin = x - xm2;                            /* bandpass source: zeros at DC + Nyquist */
+        xm2=xm1; xm1=x;
         int64_t sum=0;
         for(int i=0;i<N;i++){
-            fx y=fmul(a1[i],s1[i])-fmul(r2[i],s2[i])+drive;
+            fx exc=fmul(gi[i],xin);                  /* selective per-resonator excitation */
+            fx y=fmul(a1[i],s1[i])-fmul(r2[i],s2[i])+exc;
             s2[i]=s1[i]; s1[i]=y;
-            sum += fmul(gi[i],y);
+            sum += y;                                /* no global feedback → unconditionally stable */
         }
-        fx wetv=(fx)(sum/(N>0?N:1));
-        fx bdc=wetv-bdcx+fmul((fx)llround(0.999*ONE),bdcy); bdcx=wetv; bdcy=bdc;  /* DC block bridge */
-        blp += fmul((fx)llround(0.5*ONE), bdc-blp);                               /* bandlimit */
-        double od = (double)x/ONE*drymix + (double)bdc/ONE*(double)N*wetg;
-        if(od>1)od=1; if(od<-1)od=-1; if(fabs(od)>peak)peak=fabs(od);
-        out[t]=(short)lrint(od*32767);
+        double wetd=(double)sum/ONE*wetg;
+        double od = (double)x/ONE*drymix + wetd;
+        /* clean output: transparent soft ceiling, perfectly linear below 0.9 — never a hard clip */
+        if(od> 0.9) od= 0.9+0.1*tanh((od-0.9)/0.1);
+        else if(od<-0.9) od=-0.9-0.1*tanh((od+0.9)/0.1);
+        if(fabs(od)>peak)peak=fabs(od);
+        out[t]=(short)lrint(od*32767.0);
     }
     wav_write(argv[2],out,total);
     fprintf(stderr,"reverb: N=%d t60=%.1fs wet=%.2f → %s (%.1fs, peak=%.3f)\n",N,t60,wet,argv[2],total/RATE,peak);
