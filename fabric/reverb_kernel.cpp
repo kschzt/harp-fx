@@ -91,6 +91,16 @@ extern "C" void reverb_kernel(const struct rev_coeffs *cf,   /* gmem0  scalars  
 
     static rev_state S;                    /* BRAM, persists across calls */
 
+    /* Cyclic-partition the per-resonator arrays by the UNROLL factor so all unrolled lanes
+     * read/write in one cycle (factor banks, no port conflict). s1/s2 are read+written each
+     * iteration; a1/r2/gi are read-only coefficients. Partition factor MUST equal the loop
+     * UNROLL factor below (4). Pure scheduling/storage — software TB output is unchanged. */
+    HLS_PRAGMA(HLS ARRAY_PARTITION variable=S.s1 cyclic factor=4 dim=1)
+    HLS_PRAGMA(HLS ARRAY_PARTITION variable=S.s2 cyclic factor=4 dim=1)
+    HLS_PRAGMA(HLS ARRAY_PARTITION variable=S.a1 cyclic factor=4 dim=1)
+    HLS_PRAGMA(HLS ARRAY_PARTITION variable=S.r2 cyclic factor=4 dim=1)
+    HLS_PRAGMA(HLS ARRAY_PARTITION variable=S.gi cyclic factor=4 dim=1)
+
     /* (re)load coefficients + zero all state. do_init=1 on the first block only. */
     if (do_init) {
         struct rev_coeffs CF = *cf;
@@ -118,10 +128,16 @@ extern "C" void reverb_kernel(const struct rev_coeffs *cf,   /* gmem0  scalars  
         S.xm1 = S.xm2 = 0;
     }
 
-    /* the audio recurrence. PIPELINE off on the sample loop: it carries the per-sample resonator
-     * state (s2=s1; s1=y) — sequential is correct AND keeps HLS from force-unrolling the inner
-     * resonator loop (the DSP/LUT explosion). The resonator loop is UNROLL off so all RESN
-     * resonators time-share ONE rolled engine. Tiny + low-DSP — right for an offline render. */
+    /* the audio recurrence. PIPELINE off on the SAMPLE loop: it carries the per-sample resonator
+     * state (s2=s1; s1=y) across samples — sequential is correct (sample t+1 reads t's state). The
+     * inner RESONATOR loop, by contrast, has NO cross-resonator dependency (each i owns its s1/s2;
+     * the only carry is the `sum` reduction, which HLS turns into a reduction tree), so it
+     * PIPELINEs at II=1 AND UNROLLs by 4: 4 resonators retired per cycle instead of ~5.6 cycles
+     * each rolled. With the matching cyclic ARRAY_PARTITION (factor 4) above, N=3000 → ~750
+     * cycles/sample for the network; at the ~150 MHz fabric clock that is well over 2x real-time
+     * (vs 8.8k rolled), with huge DSP/BRAM headroom. Bit-exact is unchanged: unroll/partition/
+     * pipeline are scheduling+storage only, the integer recurrence is identical to src/reverb.c
+     * (the software TB still matches GOLDEN_wet.wav byte-for-byte). */
     for (int t = 0; t < n; t++) {
         HLS_PRAGMA(HLS LOOP_TRIPCOUNT min=1 max=512)
         HLS_PRAGMA(HLS PIPELINE off)
@@ -140,8 +156,8 @@ extern "C" void reverb_kernel(const struct rev_coeffs *cf,   /* gmem0  scalars  
         int64_t sum = 0;
         for (int i = 0; i < S.n_res; i++) {               /* the resonator network          */
             HLS_PRAGMA(HLS LOOP_TRIPCOUNT min=1 max=3000)
-            HLS_PRAGMA(HLS UNROLL off)
-            HLS_PRAGMA(HLS PIPELINE off)
+            HLS_PRAGMA(HLS PIPELINE II=1)                  /* pipeline the unrolled body      */
+            HLS_PRAGMA(HLS UNROLL factor=4)                /* 4 resonators/cycle = >2x real-time */
             fx exc = fmul(S.gi[i], d);
             fx y   = fmul(S.a1[i], S.s1[i]) - fmul(S.r2[i], S.s2[i]) + exc;
             S.s2[i] = S.s1[i]; S.s1[i] = y;
