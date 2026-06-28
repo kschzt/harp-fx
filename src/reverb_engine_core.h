@@ -29,7 +29,10 @@
 #ifndef HARPFX_FX_PRIMITIVES
 #define HARPFX_FX_PRIMITIVES
 typedef int32_t fx;
-static inline fx fmul(fx a,fx b){ return (fx)(((int64_t)a*(int64_t)b)>>FB); }
+/* round-to-nearest (add half-LSB before the arithmetic shift), NOT floor: a plain >>FB
+ * truncates toward -inf, leaking ~-0.5 LSB per multiply that the feedback recirculates
+ * into a steady negative DC bias the bandpass can't catch (~-34 dBFS, soak-surfaced). */
+static inline fx fmul(fx a,fx b){ return (fx)((((int64_t)a*(int64_t)b)+((int64_t)1<<(FB-1)))>>FB); }
 #endif
 static inline fx FX(double x){ return (fx)llround(x*(double)ONE); }
 /* wet scale, PURE INTEGER (fabric-bit-exact). wetg is frozen to a Q55 int (wetg_k) on

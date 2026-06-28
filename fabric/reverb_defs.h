@@ -32,12 +32,13 @@
 #define BS 512                         /* render block (samples/handshake)        */
 
 /* fx + fmul are the ONE arithmetic primitive — identical to src/reverb.c fmul().
- * int64 intermediate, arithmetic >>26; never overflows int32 on the result.
+ * int64 intermediate, ROUND-TO-NEAREST (half-LSB added before the >>26): a plain floor
+ * leaked ~-0.5 LSB/multiply -> recirculated DC bias (soak-surfaced); never overflows int32.
  * Guarded (HARPFX_FX_PRIMITIVES) so this header co-includes with reverb_engine_core.h. */
 #ifndef HARPFX_FX_PRIMITIVES
 #define HARPFX_FX_PRIMITIVES
 typedef int32_t fx;
-static inline fx fmul(fx a, fx b){ return (fx)(((int64_t)a * (int64_t)b) >> FB); }
+static inline fx fmul(fx a, fx b){ return (fx)((((int64_t)a * (int64_t)b) + ((int64_t)1 << (FB-1))) >> FB); }
 #endif
 
 /* scalar coefficients, written once to DDR (m_axi gmem0). Computed on the HOST in
