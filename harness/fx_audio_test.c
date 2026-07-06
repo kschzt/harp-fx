@@ -85,6 +85,14 @@ static void wav_write_stereo(const char *p, const short *lr, long n) {
     fwrite(lr, 2, n * 2, f); fclose(f);
 }
 
+/* softceil — never hard-clips (byte-identical to src/reverb.c / the golden). The device-wet
+ * int16 dump below must go through it, else a >full-scale wet sample wraps mod 2^16 into an
+ * opposite-polarity click. Float-exact verification (devwet vs orawet) is unaffected. */
+static inline double softceil(double v) {
+    if (v >  0.9) return  0.9 + 0.1 * tanh((v - 0.9) / 0.1);
+    if (v < -0.9) return -0.9 - 0.1 * tanh((v + 0.9) / 0.1); return v;
+}
+
 static int read_all(int fd, void *buf, size_t n) {
     uint8_t *p = buf; size_t off = 0;
     while (off < n) {
@@ -224,7 +232,7 @@ int main(int argc, char **argv) {
     }
     /* 7b. write device wet as wet-only int16 stereo WAV */
     short *o16 = malloc(sizeof(short) * total * 2);
-    for (long i = 0; i < total * 2; i++) o16[i] = (short)lrint((double)devwet[i] * 32767.0);
+    for (long i = 0; i < total * 2; i++) o16[i] = (short)lrint(softceil((double)devwet[i]) * 32767.0);
     wav_write_stereo(devwetpath, o16, total);
 
     printf("\n=== §8.8 audio.fx reverb bridge verification ===\n");

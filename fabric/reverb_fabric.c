@@ -49,6 +49,15 @@ extern void reverb_kernel(const struct rev_coeffs*, const fx*, const fx*, fx*, i
 
 static inline fx FX(double x){ return (fx)llround(x*(double)ONE); }
 
+/* softceil — transparent below 0.9, tanh soft-knee above; never hard-clips. Byte-identical
+ * to src/reverb.c (the golden output recipe). The Q26->int16 cast in the host-post loop MUST
+ * go through this: a >full-scale wet sample cast straight to short wraps mod 2^16 into an
+ * opposite-polarity full-scale click (RME bar: never hard-clip). Transparent for the golden
+ * input (wet peak 0.374 << 0.9) so GOLDEN_wet.wav is unchanged. */
+static inline double softceil(double v){
+    if(v> 0.9)return 0.9+0.1*tanh((v-0.9)/0.1);
+    if(v<-0.9)return -0.9-0.1*tanh((v+0.9)/0.1); return v; }
+
 /* ---- WAV io (16-bit, mono read; stereo write) — verbatim from src/reverb.c ---- */
 static float* wav_read(const char*p,long*nout){
     FILE*f=fopen(p,"rb"); if(!f){perror(p);return NULL;}
@@ -163,7 +172,7 @@ int main(int argc,char**argv){
 #endif
         /* ---- host post: Q26 -> int16 wet-only stereo (== golden recipe) ---- */
         for(int t=0;t<bs;t++){
-            double oL=(double)YOU[t*2]/ONE, oR=(double)YOU[t*2+1]/ONE;
+            double oL=softceil((double)YOU[t*2]/ONE), oR=softceil((double)YOU[t*2+1]/ONE);
             if(fabs(oL)>peak)peak=fabs(oL);
             if(fabs(oR)>peak)peak=fabs(oR);
             out[(pos+t)*2]  =(short)lrint(oL*32767.0);
