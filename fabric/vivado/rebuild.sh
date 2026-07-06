@@ -36,9 +36,13 @@ done
 cd "$BUILD"
 # shellcheck disable=SC1090
 source "$VITIS_SETTINGS"
+# preflight: 2025.1 unified — HLS is `vitis-run --mode hls` (classic vitis_hls is gone)
+command -v vitis-run >/dev/null || { echo "FATAL: vitis-run not on PATH after sourcing $VITIS_SETTINGS"; exit 1; }
+command -v vivado    >/dev/null || { echo "FATAL: vivado not on PATH after sourcing $VITIS_SETTINGS"; exit 1; }
+command -v xsct      >/dev/null || { echo "FATAL: xsct not on PATH (make_dtbo.sh needs it)"; exit 1; }
 
 echo "=== [1/4] HLS csynth + export IP ($(date +%T)) ==="
-vitis_hls -f run_export.tcl
+vitis-run --mode hls --tcl run_export.tcl
 
 echo "=== [2/4] block design ($(date +%T)) ==="
 vivado -mode batch -source build_bd.tcl
