@@ -1,8 +1,7 @@
 # harp-fx
 
 Audio **effects** engines for [HARP](https://github.com/kschzt/harp) devices — the
-processor side of the protocol's new audio-in (host→device) path. Private, like
-[jetson-synth](https://github.com/kschzt/jetson-synth); depends on the public `harp` library/spec.
+processor side of the protocol's new audio-in (host→device) path. Sepends on the public `harp` library/spec.
 
 The headline engine: a **huge real-time resonator-network reverb** for the Kria FPGA. A
 dense field of thousands of coupled tuned resonators, excited by the *input* audio, ringing
